@@ -1,4 +1,4 @@
-import { useRef, useMemo, useState } from 'react'
+import { useRef, useMemo, useState, useEffect } from 'react'
 import { safeUrl, isSafeUrl } from '../lib/safeUrl'
 import { isImage, isVideo } from '../lib/storage'
 
@@ -198,6 +198,63 @@ function MediaViewer({ media, index, onClose, onChange }) {
   )
 }
 
+// PDF рисуем сами (pdf.js) страницами по ширине экрана: встроенный iframe в iOS/Telegram
+// показывает только обрезанную первую страницу без масштабирования.
+function PdfPages({ url }) {
+  const boxRef = useRef(null)
+  const [state, setState] = useState('loading') // loading | ready | error
+  useEffect(() => {
+    let cancelled = false
+    let doc = null
+    async function run() {
+      try {
+        const pdfjs = await import('pdfjs-dist/legacy/build/pdf.min.mjs')
+        const worker = (await import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url')).default
+        pdfjs.GlobalWorkerOptions.workerSrc = worker
+        doc = await pdfjs.getDocument({ url }).promise
+        const box = boxRef.current
+        if (cancelled || !box) return
+        const width = box.clientWidth
+        const ratio = Math.min(window.devicePixelRatio || 1, 2)
+        for (let n = 1; n <= doc.numPages; n++) {
+          const page = await doc.getPage(n)
+          if (cancelled) return
+          const base = page.getViewport({ scale: 1 })
+          const scale = width / base.width
+          const viewport = page.getViewport({ scale: scale * ratio })
+          const canvas = document.createElement('canvas')
+          canvas.width = Math.floor(viewport.width)
+          canvas.height = Math.floor(viewport.height)
+          canvas.style.width = '100%'
+          canvas.style.height = 'auto'
+          canvas.style.display = 'block'
+          canvas.style.marginBottom = '6px'
+          box.appendChild(canvas)
+          await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
+          if (n === 1) setState('ready')
+        }
+      } catch (e) {
+        console.error('pdf', e)
+        if (!cancelled) setState('error')
+      }
+    }
+    run()
+    return () => { cancelled = true; if (doc) doc.destroy() }
+  }, [url])
+  return (
+    <div className="pdf-scroll">
+      {state === 'loading' && <p className="muted" style={{ padding: 16 }}>Загружаем документ…</p>}
+      {state === 'error' && (
+        <div className="file-viewer-fallback">
+          <p className="muted">Не удалось показать документ внутри приложения.</p>
+          <a href={url} target="_blank" rel="noreferrer" className="btn-primary block">Открыть файл</a>
+        </div>
+      )}
+      <div ref={boxRef} className="pdf-pages" />
+    </div>
+  )
+}
+
 function FileViewerOverlay({ file, onClose }) {
   const previewable = isPreviewableFile(file.name)
   return (
@@ -205,7 +262,7 @@ function FileViewerOverlay({ file, onClose }) {
       <button type="button" className="lightbox-close" onClick={onClose}>✕</button>
       <div className="file-viewer-box" onClick={(e) => e.stopPropagation()}>
         {previewable ? (
-          <iframe src={safeUrl(file.url)} title={file.name} className="file-viewer-frame" />
+          <PdfPages url={safeUrl(file.url)} />
         ) : (
           <div className="file-viewer-fallback">
             <p className="card-title">📄 {file.name}</p>
