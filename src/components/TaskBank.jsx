@@ -2,23 +2,12 @@ import { useEffect, useState } from 'react'
 import { safeUrl, isSafeUrl } from '../lib/safeUrl'
 import { supabase } from '../lib/supabase'
 import { uploadFiles } from '../lib/storage'
+import { isCorrectAnswer } from '../lib/answerCheck'
 import FileUploader, { AttachmentList, AttachmentEditor } from './FileUploader'
 
 // ---------- Проверка ответа ----------
-function norm(s) {
-  return String(s ?? '').trim().toLowerCase()
-    .replace(/[\u2212\u2013\u2014]/g, '-').replace(/\s+/g, '').replace(/,/g, '.').replace(/\.$/, '')
-}
-// Несколько верных вариантов через «|», напр.: 0.5|1/2
-export function isCorrectAnswer(user, correct) {
-  const u = norm(user)
-  if (!u) return false
-  return String(correct ?? '').split('|').map(norm).filter(Boolean).some(v => {
-    const a = Number(v), b = Number(u)
-    if (!isNaN(a) && !isNaN(b)) return Math.abs(a - b) < 1e-9
-    return v === u
-  })
-}
+// Умная проверка (дроби, корни, π, арк-функции, промежутки, пункты а/б/в) — в src/lib/answerCheck.js
+export { isCorrectAnswer }
 
 // Ответ картинкой: новое поле answer_attachments, либо (для ранее загруженного банка)
 // картинки «Ответ», лежащие в solution_attachments без текста решения
