@@ -178,13 +178,13 @@ export default function Homework() {
                           const editable = hw.status === 'assigned'
                           const done = hw.status === 'checked' || hw.status === 'submitted'
                           const value = isMine ? (answers[t.id] ?? t.student_answer ?? '') : (t.student_answer ?? '')
-                          const wrong = hw.status === 'checked' && t.score != null && t.score < t.max_score
+                          const wrong = hw.status === 'checked' && !hw.manual_total && t.score != null && t.score < t.max_score
                           const imgs = answerImages(b), sImgs = solutionImages(b)
                           return (
-                            <div key={t.id} className={'task-card' + (hw.status === 'checked' && t.score >= t.max_score ? ' solved' : '')}>
+                            <div key={t.id} className={'task-card' + (hw.status === 'checked' && !hw.manual_total && t.score >= t.max_score ? ' solved' : '')}>
                               <div className="row-between">
                                 <span className="task-num">{i + 1}. {t.title}</span>
-                                {hw.status === 'checked' && t.score != null && <span className={'tag ' + (t.score >= t.max_score ? 'tag-green' : 'tag-red')}>{t.score >= t.max_score ? '✓ Верно' : '✕ Неверно'}</span>}
+                                {hw.status === 'checked' && !hw.manual_total && t.score != null && <span className={'tag ' + (t.score >= t.max_score ? 'tag-green' : 'tag-red')}>{t.score >= t.max_score ? '✓ Верно' : '✕ Неверно'}</span>}
                               </div>
                               {b.condition && <p className="task-text">{b.condition}</p>}
                               <AttachmentList items={b.condition_attachments} full />
@@ -218,7 +218,7 @@ export default function Homework() {
                       </>
                     )}
 
-                    {hw.status === 'checked' && list.filter(t => !t.task_id).length > 0 && (
+                    {hw.status === 'checked' && !hw.manual_total && list.filter(t => !t.task_id).length > 0 && (
                       <>
                         <p className="eyebrow">Результат</p>
                         {list.filter(t => !t.task_id).map(t => (
@@ -235,6 +235,12 @@ export default function Homework() {
                       </>
                     )}
                     {hw.status === 'checked' && <p className="score-line">Итого: {hw.correct_tasks} / {hw.total_tasks} баллов</p>}
+                    {hw.status === 'checked' && hw.feedback_attachments?.length > 0 && (
+                      <>
+                        <p className="eyebrow">📎 Файлы от учителя</p>
+                        <AttachmentList items={hw.feedback_attachments} full />
+                      </>
+                    )}
 
                     {subs.length > 0 && (
                       <>
