@@ -8,6 +8,8 @@ import { useSettings, toTest, pointsFor, isPart1, fullMax, THRESHOLD_PRIMARY } f
 import { isCorrectAnswer, answerImages, solutionImages } from '../components/TaskBank'
 import { AttachmentList } from '../components/FileUploader'
 import { NumberChips } from '../components/MockHistory'
+import BuildPicker, { pickFromPlan, planTotal } from '../components/BuildPicker'
+import { dueMoment, fmtDue } from '../lib/due'
 
 const FULL_MINUTES = 235
 
@@ -52,6 +54,11 @@ export default function Mocks() {
       <li key={e.id} className="card">
         <p className="card-title">{e.title}</p>
         {e.description && <p className="muted">{e.description}</p>}
+        {dueMoment(e) && (
+          <p className={'small-text ' + (dueMoment(e) < new Date() && !done.length ? 'error-text' : 'muted')}>
+            ⏰ Сдать до {fmtDue(e)}{dueMoment(e) < new Date() && !done.length ? ' — срок прошёл' : ''}
+          </p>
+        )}
         <p className="muted small-text">
           {e.time_limit_minutes ? `⏱ ${e.time_limit_minutes} мин` : 'Без таймера'}
           {done.length ? ` · попыток: ${done.length}` : ''}
@@ -104,7 +111,8 @@ function SelfBuilder({ student, settings, onCreated }) {
   const [open, setOpen] = useState(false)
   const [nums, setNums] = useState(null) // [{ num, topicId, name }]
   const [allTasks, setAllTasks] = useState([])
-  const [sel, setSel] = useState(new Set())
+  const [subs, setSubs] = useState([])
+  const [plan, setPlan] = useState({}) // { num: { count, subs: [] } }
   const [preset, setPreset] = useState('p1')
   const [timer, setTimer] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -113,42 +121,38 @@ function SelfBuilder({ student, settings, onCreated }) {
     if (!open || nums) return
     Promise.all([
       supabase.from('topics').select('id, name, position').order('position'),
-      fetchAll(() => supabase.from('tasks').select('id, topic_id, answer').order('id')),
-    ]).then(([{ data: tp }, ts]) => {
+      fetchAll(() => supabase.from('tasks').select('id, topic_id, subtopic_id, answer').order('id')),
+      supabase.from('subtopics').select('id, topic_id, name, position').order('position'),
+    ]).then(([{ data: tp }, ts, { data: sb }]) => {
       const has = new Set(ts.map(t => t.topic_id))
       const list = (tp ?? []).map(t => ({ num: Number(numberOf(t.name)), topicId: t.id, name: t.name }))
         .filter(x => x.num && has.has(x.topicId)).sort((a, b) => a.num - b.num)
-      setNums(list); setAllTasks(ts); applyPreset('p1', list)
+      setNums(list); setAllTasks(ts); setSubs(sb ?? []); applyPreset('p1', list)
     })
   }, [open])
 
   function applyPreset(p, list = nums) {
     setPreset(p)
-    setSel(new Set(list.filter(x => p === 'full' || (p === 'p1' ? isPart1(x.num) : !isPart1(x.num))).map(x => x.num)))
-  }
-  function toggle(n) {
-    const s = new Set(sel); s.has(n) ? s.delete(n) : s.add(n); setSel(s); setPreset('custom')
+    const next = {}
+    list.filter(x => p === 'full' || (p === 'p1' ? isPart1(x.num) : !isPart1(x.num))).forEach(x => { next[x.num] = { count: 1, subs: [] } })
+    setPlan(next)
   }
 
-  const chosen = (nums ?? []).filter(x => sel.has(x.num))
-  const max = chosen.reduce((a, x) => a + pointsFor(x.num, settings), 0)
+  const chosen = (nums ?? []).filter(x => plan[x.num]?.count)
+  const count = planTotal(plan)
+  const max = chosen.reduce((a, x) => a + pointsFor(x.num, settings) * plan[x.num].count, 0)
   const minutes = Math.max(15, Math.round(FULL_MINUTES * max / (fullMax(settings) || 33)))
 
   async function create() {
-    if (!chosen.length) return
+    if (!count) return
     setBusy(true)
     try {
       const { data: ok } = await supabase.from('task_attempts').select('task_id').eq('student_id', student.id).eq('is_correct', true)
       const solved = new Set((ok ?? []).map(a => a.task_id))
-      const slots = []
-      chosen.forEach(x => {
-        const pool = allTasks.filter(t => t.topic_id === x.topicId)
-        const fresh = pool.filter(t => !solved.has(t.id))
-        const from = fresh.length ? fresh : pool
-        const task = from[Math.floor(Math.random() * from.length)]
-        if (task) slots.push({ task, num: x.num })
-      })
-      const label = preset === 'custom' ? '№' + chosen.map(x => x.num).join(', ') : PRESETS.find(p => p[0] === preset)[1]
+      const slots = pickFromPlan(nums, plan, allTasks, solved)
+      const label = preset === 'custom'
+        ? chosen.map(x => plan[x.num].count > 1 ? `№${x.num}×${plan[x.num].count}` : `№${x.num}`).join(', ')
+        : PRESETS.find(p => p[0] === preset)[1]
       const date = new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })
       const { data: exam, error } = await supabase.from('mock_exams').insert({
         title: `Мой пробник: ${label} · ${date}`, is_self: true, is_published: true, student_id: student.id,
@@ -171,25 +175,22 @@ function SelfBuilder({ student, settings, onCreated }) {
   return (
     <section className="card">
       <p className="card-title">🎲 Свой пробник</p>
-      <p className="muted small-text">Случайные задания из банка — сначала те, что ты ещё не решал.</p>
+      <p className="muted small-text">Случайные задания из банка — сначала те, что ты ещё не решал. Для каждого номера можно задать, сколько заданий нужно, и выбрать прототипы.</p>
       {!nums ? <p className="muted">Загрузка…</p> : (
         <>
           <div className="chip-wrap">
             {PRESETS.map(([k, l]) => <button key={k} className={'filter-chip' + (preset === k ? ' active' : '')} onClick={() => applyPreset(k)}>{l}</button>)}
+            <button className="filter-chip" onClick={() => { setPlan({}); setPreset('custom') }}>Очистить</button>
           </div>
-          <p className="muted small-text" style={{ marginTop: 12 }}>Или выбери номера сам:</p>
-          <div className="chip-wrap num-pick">
-            {nums.map(x => (
-              <button key={x.num} className={'filter-chip' + (sel.has(x.num) ? ' active' : '')} onClick={() => toggle(x.num)}>{x.num}</button>
-            ))}
-          </div>
+          <p className="muted small-text" style={{ marginTop: 12 }}>Сколько заданий каждого номера:</p>
+          <BuildPicker nums={nums} tasks={allTasks} subtopics={subs} plan={plan} onChange={(pl) => { setPlan(pl); setPreset('custom') }} />
           <div className="builder-sum">
-            <span>Заданий: <b>{chosen.length}</b></span>
-            <span>Макс.: <b className="prim">{max}</b> перв. → <b className="test">{toTest(max, settings.scale)}</b> тест.</span>
+            <span>Заданий: <b>{count}</b></span>
+            <span>Макс.: <b className="prim">{max}</b> перв.{count && max <= fullMax(settings) ? <> → <b className="test">{toTest(max, settings.scale)}</b> тест.</> : null}</span>
           </div>
           <label className="checkbox-row"><input type="checkbox" checked={timer} onChange={e => setTimer(e.target.checked)} /> Таймер: {minutes} мин</label>
           <div className="btn-row">
-            <button className="btn-primary" disabled={busy || !chosen.length} onClick={create}>{busy ? 'Собираю…' : '▶ Начать'}</button>
+            <button className="btn-primary" disabled={busy || !count} onClick={create}>{busy ? 'Собираю…' : '▶ Начать'}</button>
             <button className="btn-secondary" onClick={() => setOpen(false)}>Отмена</button>
           </div>
         </>
@@ -278,6 +279,7 @@ function TakeExam({ exam, attempt, studentId, onDone }) {
     const row = {
       answers: final, score: sumScore(final), max_score: max,
       status: pending ? 'submitted' : 'checked', submitted_at: new Date().toISOString(),
+      is_late: !!dueMoment(exam) && Date.now() > dueMoment(exam).getTime(),
     }
     const { data, error } = await supabase.from('mock_attempts').update(row).eq('id', attempt.id).select().single()
     if (attemptsRows.length) await supabase.from('task_attempts').insert(attemptsRows)
@@ -350,6 +352,7 @@ export function Review({ exam, attempt, onBack, footer, embedded = false }) {
         <ScoreBox attempt={attempt} settings={settings} />
         <NumberChips attempt={attempt} />
         {attempt.teacher_comment && <p className="muted">💬 {attempt.teacher_comment}</p>}
+        {attempt.feedback_attachments?.length > 0 && <><p className="eyebrow">📎 Файлы от учителя</p><AttachmentList items={attempt.feedback_attachments} full /></>}
       </section>
       {!slots ? <p className="muted">Загрузка…</p> : slots.map((s, i) => {
         const a = ans[s.id] || {}
