@@ -4,7 +4,11 @@ import { fetchAll, shortName, numberOf } from '../../lib/progress'
 import { useSettings, loadSettings, saveSetting, toTest, pointsFor, isPart1, fullMax, DEFAULT_POINTS, DEFAULT_SCALE } from '../../lib/settings'
 import { loadExamSlots, sumScore, showAnswer } from '../../lib/mocks'
 import { useTopics } from '../../components/TopicPicker'
-import { AttachmentList } from '../../components/FileUploader'
+import FileUploader, { AttachmentList, AttachmentEditor } from '../../components/FileUploader'
+import { uploadFiles } from '../../lib/storage'
+import DueEditor from '../../components/DueEditor'
+import { dueFields, dueParts, fmtDue } from '../../lib/due'
+import BuildPicker, { pickFromPlan, planTotal } from '../../components/BuildPicker'
 import { Review } from '../Mocks'
 
 export default function TeacherMocks() {
@@ -78,6 +82,7 @@ export default function TeacherMocks() {
                 <p className="card-title">{e.title}</p>
                 <span className={'tag ' + (e.is_published ? 'tag-green' : 'tag-yellow')}>{e.is_published ? 'Открыт' : 'Черновик'}</span>
               </div>
+              {e.due_date && <p className="muted small-text">⏰ До {fmtDue(e)}</p>}
               <p className="muted small-text">
                 Сдали: {counts[e.id]?.done || 0}
                 {counts[e.id]?.wait ? ` · ждут проверки: ${counts[e.id].wait}` : ''}
@@ -94,13 +99,18 @@ export default function TeacherMocks() {
 function ExamEditor({ exam, onBack, onChanged }) {
   const { topics, subtopics } = useTopics()
   const [tab, setTab] = useState('tasks')
-  const [form, setForm] = useState({ ...exam, audience: exam.student_id ? 'student:' + exam.student_id : exam.group_id ? 'group:' + exam.group_id : 'all' })
+  const [form, setForm] = useState({
+    ...exam,
+    groupIds: [...new Set([...(exam.group_ids || []), ...(exam.group_id ? [exam.group_id] : [])])],
+    studentIds: [...new Set([...(exam.student_ids || []), ...(exam.student_id ? [exam.student_id] : [])])],
+    due_date: dueParts(exam).date, due_time: dueParts(exam).time,
+  })
+  const [plan, setPlan] = useState({})
   const [groups, setGroups] = useState([])
   const [students, setStudents] = useState([])
   const [slots, setSlots] = useState(null)
   const [allTasks, setAllTasks] = useState([])
   const [msg, setMsg] = useState('')
-  const [pickTopics, setPickTopics] = useState(null)
   const [adding, setAdding] = useState(false)
 
   async function loadSlots() { setSlots(await loadExamSlots(exam.id)) }
@@ -108,22 +118,26 @@ function ExamEditor({ exam, onBack, onChanged }) {
     loadSlots()
     supabase.from('groups').select('*').order('name').then(({ data }) => setGroups(data ?? []))
     supabase.from('students').select('id, first_name, last_name').eq('is_teacher', false).eq('is_parent', false).order('first_name').then(({ data }) => setStudents(data ?? []))
-    fetchAll(() => supabase.from('tasks').select('id, topic_id, answer').order('id')).then(setAllTasks)
+    fetchAll(() => supabase.from('tasks').select('id, topic_id, subtopic_id, answer').order('id')).then(setAllTasks)
   }, [exam.id])
 
   const topicsWithTasks = useMemo(() => {
     const has = new Set(allTasks.map(t => t.topic_id))
     return topics.filter(t => has.has(t.id))
   }, [topics, allTasks])
-  useEffect(() => { if (pickTopics === null && topicsWithTasks.length) setPickTopics(new Set(topicsWithTasks.map(t => t.id))) }, [topicsWithTasks])
+  const numsList = useMemo(() => topicsWithTasks
+    .map(t => ({ num: Number(numberOf(t.name)), topicId: t.id, name: t.name })).filter(x => x.num).sort((a, b) => a.num - b.num), [topicsWithTasks])
+  useEffect(() => {
+    if (numsList.length && !Object.keys(plan).length) setPlan(Object.fromEntries(numsList.map(x => [x.num, { count: 1, subs: [] }])))
+  }, [numsList])
 
   async function saveSettings(patch = {}) {
     const f = { ...form, ...patch }
-    const [kind, id] = f.audience.split(':')
     const row = {
       title: f.title.trim() || 'Пробник', description: f.description?.trim() || null,
       time_limit_minutes: f.time_limit_minutes ? Number(f.time_limit_minutes) : null,
-      group_id: kind === 'group' ? id : null, student_id: kind === 'student' ? id : null,
+      group_id: null, student_id: null, group_ids: f.groupIds, student_ids: f.studentIds,
+      ...dueFields(f.due_date, f.due_time),
       is_published: !!f.is_published, show_solutions: !!f.show_solutions,
     }
     const { error } = await supabase.from('mock_exams').update(row).eq('id', exam.id)
@@ -131,6 +145,7 @@ function ExamEditor({ exam, onBack, onChanged }) {
     setMsg(error ? 'Ошибка: ' + error.message : 'Сохранено ✓'); setTimeout(() => setMsg(''), 2000)
     onChanged()
   }
+  const toggleIn = (arr, id) => arr.includes(id) ? arr.filter(x => x !== id) : [...arr, id]
 
   const settings = useSettings()
   const numOfTask = (t) => numberOf(topics.find(x => x.id === t.topic_id)?.name)
@@ -148,18 +163,32 @@ function ExamEditor({ exam, onBack, onChanged }) {
 
   async function autoBuild() {
     if (slots.length && !confirm('Заменить текущие задания новым случайным вариантом?')) return
-    const chosen = topicsWithTasks.filter(t => pickTopics.has(t.id)).sort((a, b) => topicOrder(a.id) - topicOrder(b.id))
+    const picked = pickFromPlan(numsList, plan, allTasks)
     await supabase.from('mock_exam_tasks').delete().eq('exam_id', exam.id)
-    const rows = []
-    const ex = new Set()
-    chosen.forEach((t, i) => {
-      const task = randomFrom(t.id, ex)
-      if (!task) return
-      ex.add(task.id)
-      rows.push({ exam_id: exam.id, task_id: task.id, position: i + 1, ...defaults(task) })
-    })
+    const rows = picked.map((x, i) => ({ exam_id: exam.id, task_id: x.task.id, position: i + 1, ...defaults(x.task) }))
     if (rows.length) await supabase.from('mock_exam_tasks').insert(rows)
     loadSlots()
+  }
+
+  // После изменения баллов за задания: пересчитать уже сданные работы учеников
+  async function recalcAttempts() {
+    if (!confirm('Пересчитать результаты всех сдавших по текущим баллам заданий? Баллы, поставленные вами вручную, сохранятся (не больше нового максимума).')) return
+    setMsg('Пересчитываю…')
+    const { data: atts } = await supabase.from('mock_attempts').select('*').eq('exam_id', exam.id).neq('status', 'in_progress')
+    const max = slots.reduce((sum, x) => sum + x.points, 0)
+    for (const a of atts ?? []) {
+      const answers = { ...(a.answers || {}) }
+      slots.forEach(sl => {
+        const cur = answers[sl.id]; if (!cur) return
+        let got = cur.got
+        if (cur.mode === 'manual' || sl.check_mode === 'manual') got = got == null ? null : Math.min(got, sl.points)
+        else got = cur.ok ? sl.points : 0
+        answers[sl.id] = { ...cur, points: sl.points, got }
+      })
+      const score = a.manual_total ? Math.min(a.score, max) : sumScore(answers)
+      await supabase.from('mock_attempts').update({ answers, score, max_score: max }).eq('id', a.id)
+    }
+    setMsg(`Пересчитано работ: ${(atts ?? []).length} ✓`); setTimeout(() => setMsg(''), 3000)
   }
 
   async function replace(s) {
@@ -209,12 +238,23 @@ function ExamEditor({ exam, onBack, onChanged }) {
           <textarea className="text-input" rows={2} placeholder="Описание (необязательно)" value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} />
           <p className="eyebrow">Время, минут (пусто — без ограничения)</p>
           <input className="text-input" type="number" value={form.time_limit_minutes ?? ''} onChange={e => setForm({ ...form, time_limit_minutes: e.target.value })} />
-          <p className="eyebrow">Кому доступен</p>
-          <select className="text-input" value={form.audience} onChange={e => setForm({ ...form, audience: e.target.value })}>
-            <option value="all">Всем ученикам</option>
-            {groups.map(g => <option key={g.id} value={'group:' + g.id}>Группа: {g.name}</option>)}
-            {students.map(s => <option key={s.id} value={'student:' + s.id}>Ученик: {s.first_name} {s.last_name}</option>)}
-          </select>
+          <p className="eyebrow">Кому доступен (можно выбрать несколько)</p>
+          <p className="muted small-text">Ничего не выбрано — виден всем ученикам.</p>
+          {groups.length > 0 && <p className="muted small-text" style={{ marginBottom: 0 }}>Группы:</p>}
+          <div className="pick-list">
+            {groups.map(g => (
+              <label key={g.id} className="checkbox-row"><input type="checkbox" checked={form.groupIds.includes(g.id)} onChange={() => setForm({ ...form, groupIds: toggleIn(form.groupIds, g.id) })} /> {g.name}</label>
+            ))}
+          </div>
+          <p className="muted small-text" style={{ marginBottom: 0 }}>Ученики:</p>
+          <div className="pick-list">
+            {students.map(st => (
+              <label key={st.id} className="checkbox-row"><input type="checkbox" checked={form.studentIds.includes(st.id)} onChange={() => setForm({ ...form, studentIds: toggleIn(form.studentIds, st.id) })} /> {st.first_name} {st.last_name}</label>
+            ))}
+          </div>
+          <p className="eyebrow">⏰ Дедлайн (сдать до)</p>
+          <DueEditor date={form.due_date} time={form.due_time} onChange={(d, t) => setForm({ ...form, due_date: d, due_time: t })} />
+          <p className="muted small-text">После дедлайна пробник не закрывается: сдача помечается «после дедлайна».</p>
           <label className="checkbox-row"><input type="checkbox" checked={!!form.show_solutions} onChange={e => setForm({ ...form, show_solutions: e.target.checked })} /> Показывать решения после сдачи</label>
           <label className="checkbox-row"><input type="checkbox" checked={!!form.is_published} onChange={e => setForm({ ...form, is_published: e.target.checked })} /> Опубликован (ученики видят)</label>
           {msg && <p className="muted">{msg}</p>}
@@ -232,22 +272,16 @@ function ExamEditor({ exam, onBack, onChanged }) {
             </div>
             <p className="muted small-text">Заданий: {slots?.length ?? 0} · максимум баллов: {maxScore}</p>
             <p className="muted small-text">Меняйте задания до того, как ученики начнут решать: иначе их ответы не совпадут с новыми заданиями.</p>
+            <p className="muted small-text">Баллы за задания можно менять и после публикации — потом нажмите «Пересчитать результаты».</p>
+            <button className="btn-secondary" onClick={recalcAttempts}>🔄 Пересчитать результаты учеников</button>
+            {msg && <p className="muted small-text">{msg}</p>}
           </section>
 
           <section className="card">
             <p className="eyebrow" style={{ marginTop: 0 }}>Собрать вариант автоматически</p>
-            <p className="muted small-text">По одному случайному заданию из каждого отмеченного номера.</p>
-            <div className="chip-wrap">
-              {topicsWithTasks.map(t => {
-                const on = pickTopics?.has(t.id)
-                return (
-                  <button key={t.id} className={'filter-chip' + (on ? ' active' : '')} onClick={() => {
-                    const n = new Set(pickTopics); on ? n.delete(t.id) : n.add(t.id); setPickTopics(n)
-                  }}>{t.name.match(/№\s*\d+/)?.[0] || t.name}</button>
-                )
-              })}
-            </div>
-            <button className="btn-primary block" disabled={!pickTopics?.size} onClick={autoBuild}>🎲 Собрать ({pickTopics?.size || 0} заданий)</button>
+            <p className="muted small-text">Для каждого номера укажите, сколько заданий нужно (0 — не брать), и при желании выберите прототипы.</p>
+            <BuildPicker nums={numsList} tasks={allTasks} subtopics={subtopics} plan={plan} onChange={setPlan} />
+            <button className="btn-primary block" disabled={!planTotal(plan)} onClick={autoBuild}>🎲 Собрать ({planTotal(plan)} заданий)</button>
           </section>
 
           {!slots ? <p className="muted">Загрузка…</p> : slots.map((s, i) => (
@@ -352,7 +386,7 @@ function Results({ exam }) {
           <div className="row-between">
             <div>
               <p className="card-title small">{shortName(names[a.student_id])}</p>
-              <p className="muted small-text">{new Date(a.submitted_at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</p>
+              <p className="muted small-text">{new Date(a.submitted_at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}{a.is_late && ' · ⏰ после дедлайна'}</p>
             </div>
             <div style={{ textAlign: 'right' }}>
               <span className="score-badge">{a.score}/{a.max_score} → {toTest(a.score, settings.scale)}</span>
@@ -370,6 +404,9 @@ function Grade({ exam, attempt, student, onBack }) {
   const [answers, setAnswers] = useState(attempt.answers || {})
   const [comment, setComment] = useState(attempt.teacher_comment || '')
   const [saving, setSaving] = useState(false)
+  const [totalDraft, setTotalDraft] = useState('')
+  const [fbKeep, setFbKeep] = useState(attempt.feedback_attachments || [])
+  const [fbFiles, setFbFiles] = useState([])
 
   function setGot(slotId, v, max) {
     const got = v === '' ? null : Math.min(max, Math.max(0, Number(v)))
@@ -377,9 +414,18 @@ function Grade({ exam, attempt, student, onBack }) {
   }
   async function save() {
     setSaving(true)
-    const pending = Object.values(answers).some(a => a.got == null)
+    let fb = fbKeep
+    if (fbFiles.length) {
+      try { fb = [...fbKeep, ...(await uploadFiles('attachments', fbFiles))] }
+      catch (e) { setSaving(false); return alert('Не загрузился файл: ' + e.message) }
+    }
+    const t = totalDraft === '' ? null : Math.min(attempt.max_score, Math.max(0, Number(totalDraft)))
+    const pending = t == null && Object.values(answers).some(a => a.got == null)
+    const patch = t != null
+      ? { score: t, manual_total: true, status: 'checked' }
+      : { score: sumScore(answers), manual_total: false, status: pending ? 'submitted' : 'checked' }
     const { error } = await supabase.from('mock_attempts').update({
-      answers, score: sumScore(answers), teacher_comment: comment.trim() || null, status: pending ? 'submitted' : 'checked',
+      answers, ...patch, teacher_comment: comment.trim() || null, feedback_attachments: fb,
     }).eq('id', attempt.id)
     setSaving(false)
     if (error) return alert('Ошибка: ' + error.message)
@@ -402,7 +448,17 @@ function Grade({ exam, attempt, student, onBack }) {
       <div className="card task-form">
         <p className="eyebrow">Комментарий ученику</p>
         <textarea className="text-input" rows={3} value={comment} onChange={e => setComment(e.target.value)} />
-        <p className="muted">Итого: <b style={{ color: 'var(--yellow)' }}>{live.score} из {attempt.max_score}</b> первичных → <b style={{ color: 'var(--accent2)' }}>{toTest(live.score, settings.scale)}</b> тестовых</p>
+        <p className="eyebrow">Файлы к проверке</p>
+        <AttachmentEditor items={fbKeep} onChange={setFbKeep} />
+        <FileUploader files={fbFiles} onChange={setFbFiles} />
+        <p className="eyebrow">Быстро: общий балл</p>
+        <div className="quick-grade">
+          <input className="text-input" type="number" min="0" max={attempt.max_score} value={totalDraft} placeholder={attempt.manual_total ? `сейчас ${attempt.score}` : 'например ' + Math.max(0, attempt.max_score - 2)} onChange={e => setTotalDraft(e.target.value)} />
+          <span className="muted">из {attempt.max_score}</span>
+          <button className="filter-chip" onClick={() => setTotalDraft(String(attempt.max_score))}>Максимум</button>
+        </div>
+        <p className="muted small-text">Если указать общий балл, баллы по заданиям считать не нужно.</p>
+        <p className="muted">Итого: <b style={{ color: 'var(--yellow)' }}>{totalDraft !== '' ? Math.min(attempt.max_score, Number(totalDraft)) : live.score} из {attempt.max_score}</b> первичных → <b style={{ color: 'var(--accent2)' }}>{toTest(totalDraft !== '' ? Math.min(attempt.max_score, Number(totalDraft)) : live.score, settings.scale)}</b> тестовых</p>
         <button className="btn-primary block" disabled={saving} onClick={save}>{saving ? 'Сохранение…' : '✅ Сохранить проверку'}</button>
       </div>
     </>
