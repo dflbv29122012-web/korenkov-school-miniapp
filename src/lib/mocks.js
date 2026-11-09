@@ -23,8 +23,9 @@ export async function loadExamSlots(examId) {
 export async function examsForStudent(studentId) {
   const { data: links } = await supabase.from('student_groups').select('group_id').eq('student_id', studentId)
   const gids = (links ?? []).map(l => l.group_id)
-  const or = ['and(group_id.is.null,student_id.is.null)', `student_id.eq.${studentId}`]
-  if (gids.length) or.push(`group_id.in.(${gids.join(',')})`)
+  // «Всем» — когда не выбраны ни группы, ни ученики; иначе — выбранные ученики и группы
+  const or = ['and(group_id.is.null,student_id.is.null,group_ids.eq.{},student_ids.eq.{})', `student_id.eq.${studentId}`, `student_ids.cs.{${studentId}}`]
+  if (gids.length) { or.push(`group_id.in.(${gids.join(',')})`); gids.forEach(g => or.push(`group_ids.cs.{${g}}`)) }
   const { data } = await supabase.from('mock_exams').select('*').eq('is_published', true).or(or.join(',')).order('created_at', { ascending: false })
   return data ?? []
 }
