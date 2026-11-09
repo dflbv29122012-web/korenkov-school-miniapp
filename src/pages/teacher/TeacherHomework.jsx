@@ -7,6 +7,7 @@ import TopicPicker, { useTopics } from '../../components/TopicPicker'
 import AutoHomework, { newBlock } from './AutoHomework'
 import DueEditor from '../../components/DueEditor'
 import { dueFields, dueParts, fmtDue } from '../../lib/due'
+import { answerImages, solutionImages } from '../../components/TaskBank'
 import { loadSeen, pickTasks, taskTitle, shortName } from '../../lib/autohw'
 
 export const HW_EMPTY = {
@@ -36,6 +37,8 @@ export default function TeacherHomework() {
   const [progress, setProgress] = useState('')
   const [openId, setOpenId] = useState(null)
   const [tasksByHw, setTasksByHw] = useState({})
+  const [bank, setBank] = useState({})        // task_id -> задача из банка (условие, ответ, решение)
+  const [openSol, setOpenSol] = useState({})
   const [subsByHw, setSubsByHw] = useState({})
   const [editAttach, setEditAttach] = useState(null)
   const [editNewFiles, setEditNewFiles] = useState([])
@@ -68,6 +71,11 @@ export default function TeacherHomework() {
       if (!tasksByHw[hw.id]) {
         const { data } = await supabase.from('homework_tasks').select('*').eq('homework_id', hw.id).order('position')
         setTasksByHw(p => ({ ...p, [hw.id]: data ?? [] }))
+        const ids = (data ?? []).map(t => t.task_id).filter(Boolean)
+        if (ids.length) {
+          const { data: bt } = await supabase.from('tasks').select('*').in('id', ids)
+          setBank(p => ({ ...p, ...Object.fromEntries((bt ?? []).map(t => [t.id, t])) }))
+        }
       }
       if (!subsByHw[hw.id]) {
         const { data } = await supabase.from('homework_submissions').select('*').eq('homework_id', hw.id).order('attempt')
@@ -497,6 +505,27 @@ export default function TeacherHomework() {
                               {!t.task_id && list.length > 1 && <button className="file-remove" onClick={() => removeTaskFrom(hw, t)}>✕</button>}
                             </span>
                           </div>
+                          {t.task_id && bank[t.task_id] && (() => {
+                            const b = bank[t.task_id], sImgs = solutionImages(b), aImgs = answerImages(b)
+                            return (
+                              <div className="task-panel" style={{ margin: '8px 0' }}>
+                                {b.condition && <p className="task-text">{b.condition}</p>}
+                                <AttachmentList items={b.condition_attachments} full />
+                                {b.answer && <p className="small-text">Правильный ответ: <b>{b.answer.split('|')[0]}</b></p>}
+                                {(b.solution || sImgs.length > 0 || aImgs.length > 0) && (
+                                  <button type="button" className={'chip-btn' + (openSol[t.id] ? ' on' : '')} onClick={() => setOpenSol(p => ({ ...p, [t.id]: !p[t.id] }))}>📖 Решение</button>
+                                )}
+                                {openSol[t.id] && (
+                                  <>
+                                    {b.solution && <p className="task-text">{b.solution}</p>}
+                                    <AttachmentList items={sImgs} full />
+                                    <AttachmentList items={aImgs} full />
+                                  </>
+                                )}
+                              </div>
+                            )
+                          })()}
+                          {t.task_id && !bank[t.task_id] && <p className="muted small-text">Загрузка условия…</p>}
                           {t.task_id && <p className="muted small-text">Ответ ученика: <b>{t.student_answer || '—'}</b>{t.is_auto ? ' (проверено автоматически)' : ' (проверьте вручную)'}</p>}
                           <div className="row-center" style={{ gap: 6, flexWrap: 'wrap' }}>
                             {max <= 5 ? Array.from({ length: max + 1 }, (_, v) => (
