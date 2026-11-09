@@ -41,6 +41,10 @@ export default function TeacherHomework() {
   const [editNewFiles, setEditNewFiles] = useState([])
   const [editSaving, setEditSaving] = useState(false)
   const [dueMsg, setDueMsg] = useState(null) // { id, text, ok }
+  const [totalDraft, setTotalDraft] = useState({}) // hwId -> строка: общий балл одним числом
+  const [taskMsg, setTaskMsg] = useState({})
+  const [fbFiles, setFbFiles] = useState({})   // hwId -> новые файлы к проверке
+  const [fbKeep, setFbKeep] = useState({})     // hwId -> уже прикреплённые (после удаления лишних)
 
   const up = (patch) => setDraft({ ...draft, ...patch })
 
@@ -164,18 +168,83 @@ export default function TeacherHomework() {
 
   async function saveGrade(hw) {
     const list = tasksByHw[hw.id] || []
-    for (const t of list) {
-      await supabase.from('homework_tasks').update({
-        score: t.score === '' || t.score == null ? null : Number(t.score),
-        comment: t.comment || null,
-      }).eq('id', t.id)
+    let feedback = fbKeep[hw.id] ?? hw.feedback_attachments ?? []
+    if ((fbFiles[hw.id] || []).length) {
+      try {
+        const up = await uploadFiles('attachments', fbFiles[hw.id], (i, t) => setTaskMsg(p => ({ ...p, [hw.id]: `Загрузка файлов ${i} из ${t}…` })))
+        feedback = [...feedback, ...up]
+      } catch (e) { return alert('Не удалось загрузить файл: ' + e.message) }
     }
     const totalMax = list.reduce((s, t) => s + (Number(t.max_score) || 0), 0)
-    const totalScore = list.reduce((s, t) => s + (Number(t.score) || 0), 0)
-    await supabase.from('homework').update({
-      status: 'checked', correct_tasks: totalScore, total_tasks: totalMax,
-    }).eq('id', hw.id)
+    const typed = String(totalDraft[hw.id] ?? '').trim().replace(',', '.')
+    if (typed !== '') {
+      // общий балл одним числом, без оценки каждого задания
+      const v = Number(typed)
+      if (isNaN(v) || v < 0 || v > totalMax) return alert(`Общий балл — число от 0 до ${totalMax}`)
+      for (const t of list) {
+        if (t.comment) await supabase.from('homework_tasks').update({ comment: t.comment }).eq('id', t.id)
+      }
+      await supabase.from('homework').update({ status: 'checked', correct_tasks: v, total_tasks: totalMax, manual_total: true, feedback_attachments: feedback }).eq('id', hw.id)
+    } else {
+      for (const t of list) {
+        await supabase.from('homework_tasks').update({
+          score: t.score === '' || t.score == null ? null : Number(t.score),
+          comment: t.comment || null,
+        }).eq('id', t.id)
+      }
+      const totalScore = list.reduce((s, t) => s + (Number(t.score) || 0), 0)
+      await supabase.from('homework').update({
+        status: 'checked', correct_tasks: totalScore, total_tasks: totalMax, manual_total: false, feedback_attachments: feedback,
+      }).eq('id', hw.id)
+    }
+    setTotalDraft(p => ({ ...p, [hw.id]: '' })); setFbFiles(p => ({ ...p, [hw.id]: [] })); setFbKeep(p => ({ ...p, [hw.id]: undefined }))
     loadAll(); setOpenId(null)
+  }
+
+  // Быстрые действия при оценивании
+  function allFull(hw) {
+    setTotalDraft(p => ({ ...p, [hw.id]: '' }))
+    setTasksByHw(p => ({ ...p, [hw.id]: (p[hw.id] || []).map(t => ({ ...t, score: t.max_score })) }))
+  }
+  function restZero(hw) {
+    setTasksByHw(p => ({ ...p, [hw.id]: (p[hw.id] || []).map(t => (t.score === '' || t.score == null) ? { ...t, score: 0 } : t) }))
+  }
+
+  // Изменение заданий и баллов уже опубликованного ДЗ (статус и оценки не трогаем, итог пересчитываем)
+  async function saveTasksEdit(hw) {
+    const list = tasksByHw[hw.id] || []
+    setTaskMsg(p => ({ ...p, [hw.id]: 'Сохраняю…' }))
+    for (const t of list) {
+      const max = Math.max(1, Number(t.max_score) || 1)
+      const patch = { max_score: max, title: (t.title || '').trim() || 'Задание' }
+      if (t.score != null && t.score !== '' && Number(t.score) > max) patch.score = max
+      const { error: err } = await supabase.from('homework_tasks').update(patch).eq('id', t.id)
+      if (err) return setTaskMsg(p => ({ ...p, [hw.id]: 'Ошибка: ' + err.message }))
+    }
+    const totalMax = list.reduce((s, t) => s + Math.max(1, Number(t.max_score) || 1), 0)
+    const patch = { total_tasks: totalMax }
+    if (hw.status === 'checked') {
+      if (hw.manual_total) patch.correct_tasks = Math.min(Number(hw.correct_tasks) || 0, totalMax)
+      else patch.correct_tasks = list.reduce((s, t) => s + (Number(t.score) || 0), 0)
+    }
+    await supabase.from('homework').update(patch).eq('id', hw.id)
+    setItems(arr => arr.map(x => x.id === hw.id ? { ...x, ...patch } : x))
+    setTaskMsg(p => ({ ...p, [hw.id]: 'Сохранено ✓' }))
+  }
+  async function addTaskTo(hw) {
+    const list = tasksByHw[hw.id] || []
+    const { data, error: err } = await supabase.from('homework_tasks').insert({
+      homework_id: hw.id, position: list.length + 1, title: `Задание ${list.length + 1}`, max_score: 1,
+    }).select().single()
+    if (err) return setTaskMsg(p => ({ ...p, [hw.id]: 'Ошибка: ' + err.message }))
+    setTasksByHw(p => ({ ...p, [hw.id]: [...list, data] }))
+    await supabase.from('homework').update({ total_tasks: list.reduce((s, t) => s + (Number(t.max_score) || 1), 0) + 1 }).eq('id', hw.id)
+  }
+  async function removeTaskFrom(hw, t) {
+    if (!confirm(`Убрать «${t.title}» из этого ДЗ?`)) return
+    await supabase.from('homework_tasks').delete().eq('id', t.id)
+    setTasksByHw(p => ({ ...p, [hw.id]: (p[hw.id] || []).filter(x => x.id !== t.id) }))
+    setTaskMsg(p => ({ ...p, [hw.id]: 'Задание убрано. Нажмите «Сохранить баллы», чтобы пересчитать итог.' }))
   }
 
   async function setDue(hw, date, time) {
@@ -400,26 +469,61 @@ export default function TeacherHomework() {
                       </>
                     )}
 
-                    <p className="eyebrow">Оценка по заданиям</p>
-                    {list.map(t => (
-                      <div key={t.id} className="task-grade">
-                        <div className="row-between">
-                          <span className="card-title">{t.title}</span>
-                          <span>
-                            <input type="number" min="0" max={t.max_score} className="score-input inline-input"
-                              value={t.score ?? ''} placeholder="—"
-                              onChange={e => updTask(hw.id, t.id, 'score', e.target.value)} />
-                            <span className="muted"> / {t.max_score}</span>
-                          </span>
-                        </div>
-                        {t.task_id && <p className="muted small-text">Ответ ученика: <b>{t.student_answer || '—'}</b>{t.is_auto ? ' (проверено автоматически)' : ' (проверьте вручную)'}</p>}
-                        <input className="text-input" placeholder="Комментарий к заданию"
-                          value={t.comment ?? ''} onChange={e => updTask(hw.id, t.id, 'comment', e.target.value)} />
+                    <p className="eyebrow">Баллы и оценка</p>
+                    <div className="quick-grade">
+                      <p className="muted small-text">Быстро: поставьте общий балл одним числом — без оценки каждого задания.</p>
+                      <div className="row-center" style={{ gap: 8, flexWrap: 'wrap' }}>
+                        <input className="text-input score-input" inputMode="decimal" placeholder={hw.manual_total && hw.status === 'checked' ? String(hw.correct_tasks) : '—'}
+                          value={totalDraft[hw.id] ?? ''} onChange={e => setTotalDraft(p => ({ ...p, [hw.id]: e.target.value }))} />
+                        <span className="muted">из {curMax}</span>
+                        <button type="button" className="filter-chip" onClick={() => setTotalDraft(p => ({ ...p, [hw.id]: String(curMax) }))}>Максимум</button>
                       </div>
-                    ))}
+                    </div>
+                    <p className="muted small-text" style={{ marginTop: 10 }}>Или по заданиям (нажмите балл):</p>
+                    <div className="row-center" style={{ gap: 8, flexWrap: 'wrap' }}>
+                      <button type="button" className="filter-chip" onClick={() => allFull(hw)}>✅ Всё верно</button>
+                      <button type="button" className="filter-chip" onClick={() => restZero(hw)}>Остальное — 0</button>
+                    </div>
+                    {list.map(t => {
+                      const max = Number(t.max_score) || 1
+                      return (
+                        <div key={t.id} className="task-grade">
+                          <div className="row-between" style={{ gap: 6, flexWrap: 'wrap' }}>
+                            <input className="text-input" style={{ flex: 1, minWidth: 120 }} value={t.title ?? ''} onChange={e => updTask(hw.id, t.id, 'title', e.target.value)} />
+                            <span className="row-center" style={{ gap: 4 }}>
+                              <span className="muted small-text">макс.</span>
+                              <input type="number" min="1" className="score-input inline-input" value={t.max_score}
+                                onChange={e => updTask(hw.id, t.id, 'max_score', e.target.value)} />
+                              {!t.task_id && list.length > 1 && <button className="file-remove" onClick={() => removeTaskFrom(hw, t)}>✕</button>}
+                            </span>
+                          </div>
+                          {t.task_id && <p className="muted small-text">Ответ ученика: <b>{t.student_answer || '—'}</b>{t.is_auto ? ' (проверено автоматически)' : ' (проверьте вручную)'}</p>}
+                          <div className="row-center" style={{ gap: 6, flexWrap: 'wrap' }}>
+                            {max <= 5 ? Array.from({ length: max + 1 }, (_, v) => (
+                              <button type="button" key={v} className={'filter-chip' + (t.score != null && t.score !== '' && Number(t.score) === v ? ' active' : '')}
+                                onClick={() => { setTotalDraft(p => ({ ...p, [hw.id]: '' })); updTask(hw.id, t.id, 'score', v) }}>{max === 1 ? (v ? '✓ верно' : '✕ неверно') : v}</button>
+                            )) : (
+                              <input type="number" min="0" max={max} className="score-input inline-input" value={t.score ?? ''} placeholder="—"
+                                onChange={e => { setTotalDraft(p => ({ ...p, [hw.id]: '' })); updTask(hw.id, t.id, 'score', e.target.value) }} />
+                            )}
+                          </div>
+                          <input className="text-input" placeholder="Комментарий к заданию"
+                            value={t.comment ?? ''} onChange={e => updTask(hw.id, t.id, 'comment', e.target.value)} />
+                        </div>
+                      )
+                    })}
+                    <div className="btn-row">
+                      <button className="btn-secondary" onClick={() => addTaskTo(hw)}>+ Добавить задание</button>
+                      <button className="btn-secondary" onClick={() => saveTasksEdit(hw)}>💾 Сохранить баллы заданий</button>
+                    </div>
+                    {taskMsg[hw.id] && <p className="muted small-text">{taskMsg[hw.id]}</p>}
+                    <p className="eyebrow">📎 Файл ученику к проверке (разбор ошибок, фото, PDF)</p>
+                    <AttachmentEditor items={fbKeep[hw.id] ?? hw.feedback_attachments ?? []} onChange={v => setFbKeep(p => ({ ...p, [hw.id]: v }))} />
+                    <FileUploader files={fbFiles[hw.id] || []} onChange={f => setFbFiles(p => ({ ...p, [hw.id]: f }))}
+                      accept="image/*,video/*,.pdf,.doc,.docx" label="Прикрепить файл к проверке" />
                     {list.length > 0 && (
                       <>
-                        <p className="score-line">Итого: {curScore} / {curMax}</p>
+                        <p className="score-line">Итого: {String(totalDraft[hw.id] ?? '').trim() !== '' ? totalDraft[hw.id] : curScore} / {curMax}</p>
                         <button className="btn-primary block" onClick={() => saveGrade(hw)}>✅ Отправить результат</button>
                       </>
                     )}
