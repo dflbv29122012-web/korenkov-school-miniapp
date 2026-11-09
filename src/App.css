@@ -358,7 +358,7 @@ textarea.text-input { min-height: 70px; resize: vertical; }
 .bottom-nav-icon { font-size: 17px; }
 .bottom-nav-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 
-/* мини-тесты */
+/* РјРёРЅРё-С‚РµСЃС‚С‹ */
 .quiz-option { text-align: left; }
 .quiz-right { background: rgba(52,211,153,0.18); border-color: var(--green); color: var(--green); opacity: 1; }
 .quiz-wrong { background: rgba(248,113,113,0.18); border-color: var(--red); color: var(--red); opacity: 1; }
@@ -366,7 +366,7 @@ textarea.text-input { min-height: 70px; resize: vertical; }
 .quiz-context { white-space: pre-wrap; background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); border-radius: 10px; padding: 10px 12px; font-size: 15px; line-height: 1.5; margin: 8px 0; }
 .quiz-img { width: 100%; border-radius: 10px; margin: 8px 0; display: block; }
 
-/* ---------- v27: прогресс, рейтинг, пробники, родители ---------- */
+/* ---------- v27: РїСЂРѕРіСЂРµСЃСЃ, СЂРµР№С‚РёРЅРі, РїСЂРѕР±РЅРёРєРё, СЂРѕРґРёС‚РµР»Рё ---------- */
 .home-links { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .home-link { display: block; text-decoration: none; color: inherit; margin: 0; padding: 14px; }
 .prog-card { cursor: pointer; padding: 14px 16px; margin: 8px 0; }
@@ -427,7 +427,7 @@ textarea.text-input { min-height: 70px; resize: vertical; }
   background: rgba(251,191,36,0.1); border: 1px dashed rgba(251,191,36,0.4); border-radius: 12px; padding: 8px 18px; margin: 4px 0 8px; }
 .mode-select { width: auto; min-width: 150px; }
 
-/* v28: полосы прогресса и помесячный рейтинг */
+/* v28: РїРѕР»РѕСЃС‹ РїСЂРѕРіСЂРµСЃСЃР° Рё РїРѕРјРµСЃСЏС‡РЅС‹Р№ СЂРµР№С‚РёРЅРі */
 .pbar { margin: 10px 0; }
 .pbar-label { font-size: 14px; }
 .pbar-val { font-size: 13px; color: var(--hint); }
@@ -446,7 +446,7 @@ textarea.text-input { min-height: 70px; resize: vertical; }
 .winner-cup { font-size: 30px; }
 .rating-detail { font-size: 11px; color: var(--hint); white-space: nowrap; }
 
-/* v29: первичный/тестовый балл, свой пробник, шкала */
+/* v29: РїРµСЂРІРёС‡РЅС‹Р№/С‚РµСЃС‚РѕРІС‹Р№ Р±Р°Р»Р», СЃРІРѕР№ РїСЂРѕР±РЅРёРє, С€РєР°Р»Р° */
 .prim { color: var(--yellow); }
 .test { color: var(--accent2); }
 .score-line-sm { font-size: 14px; margin: 6px 0; color: var(--hint); }
@@ -471,7 +471,7 @@ textarea.text-input { min-height: 70px; resize: vertical; }
 
 .preview-banner { background: rgba(124,92,255,0.15); border-color: rgba(124,92,255,0.45); }
 
-/* v31: расписание */
+/* v31: СЂР°СЃРїРёСЃР°РЅРёРµ */
 .time-select { margin: 6px 0; }
 .time-row { display: flex; align-items: center; gap: 8px; }
 .time-row .text-input { flex: 1; margin: 0; }
@@ -485,14 +485,14 @@ textarea.text-input { min-height: 70px; resize: vertical; }
 .series-tag { font-size: 12px; opacity: .7; }
 .pick-tasks { max-height: 520px; overflow-y: auto; margin-top: 6px; }
 
-/* v40: оплаты, записи */
+/* v40: РѕРїР»Р°С‚С‹, Р·Р°РїРёСЃРё */
 .status-warn { border-color: rgba(251, 191, 36, 0.4) !important; }
 .pay-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--card-border); }
 .pay-value { font-size: 18px; font-weight: 700; margin: 2px 0 0; letter-spacing: .5px; }
 .pending-pay { border-color: rgba(96, 165, 250, 0.45); }
 .recordings { margin-top: 8px; }
 
-/* v42: тренировка, серия, цель */
+/* v42: С‚СЂРµРЅРёСЂРѕРІРєР°, СЃРµСЂРёСЏ, С†РµР»СЊ */
 .choice-card { display: block; width: 100%; text-align: left; color: inherit; font: inherit; cursor: pointer; }
 .choice-card:disabled { opacity: .6; cursor: default; }
 .streak-card { border-color: rgba(251, 146, 60, 0.35); }
@@ -512,3 +512,10 @@ textarea.text-input { min-height: 70px; resize: vertical; }
 .attention-row:last-child { border-bottom: none; }
 .reason-chip { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 10px; margin: 4px 4px 0 0; background: rgba(248, 113, 113, 0.12); color: var(--red); }
 .reason-chip.warn { background: rgba(251, 191, 36, 0.12); color: var(--yellow); }
+
+/* РЎРѕСЃС‚Р°РІ РІР°СЂРёР°РЅС‚Р° РїРѕ РЅРѕРјРµСЂР°Рј */
+.build-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.build-row { background: rgba(255,255,255,0.04); border: 1px solid transparent; border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.build-row.on { border-color: var(--accent); }
+.build-num { font-weight: 700; min-width: 44px; }
+.quick-grade { background: rgba(255,255,255,0.04); border-radius: 10px; padding: 10px; margin-bottom: 6px; }
