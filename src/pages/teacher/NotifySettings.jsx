@@ -8,9 +8,10 @@ const ITEMS = [
   ['hw_overdue', '⚠️ ДЗ просрочено — ученику и родителю'],
   ['payment', '💳 Оплата (помесячно): за 2 дня и при просрочке'],
   ['weekly', '📊 Итоги недели родителям — в воскресенье вечером'],
-  ['teacher_submit', '📨 Вам: ученик сдал ДЗ или пробник (с 10:00 до 20:00; ночное придёт утром)'],
+  ['student_graded', '✅ Ученику: вы проверили ДЗ или пробник — баллы в бот'],
+  ['teacher_submit', '📨 Вам: ученик сдал ДЗ или пробник (сразу, в любое время)'],
 ]
-const DEFAULTS = { lesson: true, hw_due: true, hw_overdue: true, payment: true, weekly: true, teacher_submit: true }
+const DEFAULTS = { lesson: true, hw_due: true, hw_overdue: true, payment: true, weekly: true, teacher_submit: true, student_graded: true }
 
 // Какие сообщения бот присылает ученикам и родителям
 export default function NotifySettings() {
