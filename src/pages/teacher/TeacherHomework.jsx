@@ -1,0 +1,607 @@
+import { useEffect, useState } from 'react'
+import { supabase } from '../../lib/supabase'
+import { uploadFiles } from '../../lib/storage'
+import FileUploader, { AttachmentList, AttachmentEditor } from '../../components/FileUploader'
+import { useDraft } from '../../context/DraftContext'
+import TopicPicker, { useTopics } from '../../components/TopicPicker'
+import AutoHomework, { newBlock } from './AutoHomework'
+import DueEditor from '../../components/DueEditor'
+import { dueFields, dueParts, fmtDue } from '../../lib/due'
+import { answerImages, solutionImages } from '../../components/TaskBank'
+import { loadSettings, pointsFor, isPart1 } from '../../lib/settings'
+import AutoTextarea from '../../components/AutoTextarea'
+import { numberOf } from '../../lib/progress'
+import { loadSeen, pickTasks, taskTitle, shortName } from '../../lib/autohw'
+
+export const HW_EMPTY = {
+  mode: 'students',         // 'students' | 'groups' | 'all'
+  studentIds: [],
+  groupIds: [],
+  title: '', description: '', due_date: '', due_time: '',
+  topic_id: null, subtopic_id: null,
+  files: [],
+  tasks: [{ title: 'Задание 1', max_score: 1 }],
+  open: false,
+  blocks: [], bank: [], fresh: true, perStudent: false, lessonTopic: '',
+}
+
+export default function TeacherHomework() {
+  const [draft, setDraft, clearDraft] = useDraft('teacher-homework', HW_EMPTY)
+  const { topics, subtopics } = useTopics()
+  const [viewFilter, setViewFilter] = useState({ kind: 'all', id: null })
+  const [viewTopic, setViewTopic] = useState(null)
+  const [items, setItems] = useState([])
+  const [students, setStudents] = useState([])
+  const [groups, setGroups] = useState([])
+  const [links, setLinks] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [progress, setProgress] = useState('')
+  const [openId, setOpenId] = useState(null)
+  const [tasksByHw, setTasksByHw] = useState({})
+  const [bank, setBank] = useState({})        // task_id -> задача из банка (условие, ответ, решение)
+  const [openSol, setOpenSol] = useState({})
+  const [subsByHw, setSubsByHw] = useState({})
+  const [editAttach, setEditAttach] = useState(null)
+  const [editNewFiles, setEditNewFiles] = useState([])
+  const [editSaving, setEditSaving] = useState(false)
+  const [dueMsg, setDueMsg] = useState(null) // { id, text, ok }
+  const [totalDraft, setTotalDraft] = useState({}) // hwId -> строка: общий балл одним числом
+  const [taskMsg, setTaskMsg] = useState({})
+  const [fbFiles, setFbFiles] = useState({})   // hwId -> новые файлы к проверке
+  const [fbKeep, setFbKeep] = useState({})     // hwId -> уже прикреплённые (после удаления лишних)
+
+  const up = (patch) => setDraft({ ...draft, ...patch })
+
+  async function loadAll() {
+    setLoading(true)
+    const [{ data: hw }, { data: st }, { data: gr }, { data: ln }] = await Promise.all([
+      supabase.from('homework').select('*, students(first_name,last_name,grade_level), topics(name), subtopics(name)').order('created_at', { ascending: false }).limit(300),
+      supabase.from('students').select('id, first_name, last_name').eq('is_teacher', false).eq('is_parent', false).order('first_name'),
+      supabase.from('groups').select('*').order('name'),
+      supabase.from('student_groups').select('*'),
+    ])
+    setItems(hw ?? []); setStudents(st ?? []); setGroups(gr ?? []); setLinks(ln ?? [])
+    setLoading(false)
+  }
+  useEffect(() => { loadAll() }, [])
+
+  async function openCard(hw) {
+    const next = openId === hw.id ? null : hw.id
+    setOpenId(next); setEditAttach(null)
+    if (next) {
+      if (!tasksByHw[hw.id]) {
+        const { data } = await supabase.from('homework_tasks').select('*').eq('homework_id', hw.id).order('position')
+        setTasksByHw(p => ({ ...p, [hw.id]: data ?? [] }))
+        const ids = (data ?? []).map(t => t.task_id).filter(Boolean)
+        if (ids.length) {
+          const { data: bt } = await supabase.from('tasks').select('*').in('id', ids)
+          setBank(p => ({ ...p, ...Object.fromEntries((bt ?? []).map(t => [t.id, t])) }))
+        }
+      }
+      if (!subsByHw[hw.id]) {
+        const { data } = await supabase.from('homework_submissions').select('*').eq('homework_id', hw.id).order('attempt')
+        setSubsByHw(p => ({ ...p, [hw.id]: data ?? [] }))
+      }
+    }
+  }
+
+  function resolveTargets() {
+    if (draft.mode === 'all') return students.map(s => s.id)
+    if (draft.mode === 'groups') {
+      const ids = new Set()
+      links.filter(l => draft.groupIds.includes(l.group_id)).forEach(l => ids.add(l.student_id))
+      return [...ids]
+    }
+    return draft.studentIds
+  }
+
+  async function addHomework() {
+    setError('')
+    const targets = resolveTargets()
+    if (targets.length === 0) return setError('Выберите хотя бы одного ученика или группу')
+    const blocks = (draft.blocks || []).filter(b => b.topic_id)
+    const hasAuto = blocks.length > 0
+    if (hasAuto && !draft.perStudent && (draft.bank || []).length === 0) return setError('Нажмите «Собрать задачи» или уберите блок с банком')
+
+    setSaving(true)
+    try {
+      const topicName = (id) => topics.find(t => t.id === id)?.name || ''
+      const subName = (id) => subtopics.find(t => t.id === id)?.name || ''
+
+      let attachments = []
+      if (draft.files.length > 0) {
+        attachments = await uploadFiles('attachments', draft.files, (i, t) => setProgress(`Загрузка ${i} из ${t}…`))
+      }
+      setProgress(`Создание ДЗ для ${targets.length} чел…`)
+
+      // задачи из банка для каждого ученика
+      const bankFor = {}
+      if (hasAuto) {
+        if (draft.perStudent) {
+          const seen = draft.fresh !== false ? await loadSeen(targets) : {}
+          for (const sid of targets) {
+            setProgress('Подбираю задачи…')
+            const { picked } = await pickTasks(blocks, seen[sid] || new Set(), topicName, subName)
+            bankFor[sid] = picked
+          }
+        } else {
+          const { data: chosen } = await supabase.from('tasks').select('id, topic_id, subtopic_id, position, answer').in('id', draft.bank.map(t => t.id))
+          const byId = Object.fromEntries((chosen ?? []).map(t => [t.id, t]))
+          const list = draft.bank.map(t => byId[t.id]).filter(Boolean)
+          targets.forEach(sid => { bankFor[sid] = list })
+        }
+      }
+
+      // баллы за задание — по номеру ЕГЭ (из настроек «Баллы и шкала»): первая часть 1 балл, вторая — 2/3/4;
+      // вторая часть не проверяется автоматически — её оценивает учитель по фото решения
+      const st = hasAuto ? await loadSettings() : null
+      const numOf = (t) => numberOf(topicName(t.topic_id))
+      const maxOf = (t) => { const n = numOf(t); return n ? pointsFor(n, st) : 1 }
+      const autoOf = (t) => { const n = numOf(t); return !!t.answer && (n ? isPart1(n) : true) }
+
+      // обычные задания; «Задание N» по умолчанию не берём, если есть банк
+      const manual = draft.tasks.filter(t => t.title?.trim() && !(hasAuto && /^Задание \d+$/.test(t.title.trim())))
+
+      const rowsHw = targets.map(sid => {
+        const bank = bankFor[sid] || []
+        const topicIds = new Set(bank.map(t => t.topic_id))
+        const tids = [...new Set(bank.map(t => t.topic_id))]
+        const auto = [...new Set(tids.map(id => shortName(topicName(id))))].join(', ')
+        return {
+          student_id: sid,
+          title: draft.title.trim() || (draft.lessonTopic ? `ДЗ: ${draft.lessonTopic}` : auto ? `ДЗ: ${auto}` : 'Домашнее задание'),
+          description: draft.description || null,
+          ...dueFields(draft.due_date, draft.due_time),
+          status: 'assigned',
+          attachments,
+          total_tasks: bank.reduce((s, t) => s + maxOf(t), 0) + manual.reduce((s, t) => s + (Number(t.max_score) || 0), 0),
+          topic_id: hasAuto ? (topicIds.size === 1 ? [...topicIds][0] : null) : draft.topic_id,
+          subtopic_id: hasAuto ? null : draft.subtopic_id,
+        }
+      })
+      const { data: created, error: err } = await supabase.from('homework').insert(rowsHw).select()
+      if (err) throw err
+
+      const rows = []
+      created.forEach(hw => {
+        let pos = 0
+        ;(bankFor[hw.student_id] || []).forEach(t => rows.push({
+          homework_id: hw.id, position: ++pos, title: taskTitle(t, topicName, subName), max_score: maxOf(t), task_id: t.id, is_auto: autoOf(t),
+        }))
+        manual.forEach(t => rows.push({ homework_id: hw.id, position: ++pos, title: t.title.trim(), max_score: Number(t.max_score) || 1 }))
+      })
+      if (rows.length > 0) {
+        const { error: tErr } = await supabase.from('homework_tasks').insert(rows)
+        if (tErr) throw tErr
+      }
+
+      clearDraft()
+      loadAll()
+    } catch (e) {
+      setError('Ошибка: ' + e.message)
+    } finally { setSaving(false); setProgress('') }
+  }
+
+  async function saveGrade(hw) {
+    const list = tasksByHw[hw.id] || []
+    let feedback = fbKeep[hw.id] ?? hw.feedback_attachments ?? []
+    if ((fbFiles[hw.id] || []).length) {
+      try {
+        const up = await uploadFiles('attachments', fbFiles[hw.id], (i, t) => setTaskMsg(p => ({ ...p, [hw.id]: `Загрузка файлов ${i} из ${t}…` })))
+        feedback = [...feedback, ...up]
+      } catch (e) { return alert('Не удалось загрузить файл: ' + e.message) }
+    }
+    const totalMax = list.reduce((s, t) => s + (Number(t.max_score) || 0), 0)
+    const typed = String(totalDraft[hw.id] ?? '').trim().replace(',', '.')
+    if (typed !== '') {
+      // общий балл одним числом, без оценки каждого задания
+      const v = Number(typed)
+      if (isNaN(v) || v < 0 || v > totalMax) return alert(`Общий балл — число от 0 до ${totalMax}`)
+      for (const t of list) {
+        if (t.comment) await supabase.from('homework_tasks').update({ comment: t.comment }).eq('id', t.id)
+      }
+      await supabase.from('homework').update({ status: 'checked', correct_tasks: v, total_tasks: totalMax, manual_total: true, feedback_attachments: feedback }).eq('id', hw.id)
+    } else {
+      for (const t of list) {
+        await supabase.from('homework_tasks').update({
+          score: t.score === '' || t.score == null ? null : Number(t.score),
+          comment: t.comment || null,
+        }).eq('id', t.id)
+      }
+      const totalScore = list.reduce((s, t) => s + (Number(t.score) || 0), 0)
+      await supabase.from('homework').update({
+        status: 'checked', correct_tasks: totalScore, total_tasks: totalMax, manual_total: false, feedback_attachments: feedback,
+      }).eq('id', hw.id)
+    }
+    setTotalDraft(p => ({ ...p, [hw.id]: '' })); setFbFiles(p => ({ ...p, [hw.id]: [] })); setFbKeep(p => ({ ...p, [hw.id]: undefined }))
+    loadAll(); setOpenId(null)
+  }
+
+  // Быстрые действия при оценивании
+  function allFull(hw) {
+    setTotalDraft(p => ({ ...p, [hw.id]: '' }))
+    setTasksByHw(p => ({ ...p, [hw.id]: (p[hw.id] || []).map(t => ({ ...t, score: t.max_score })) }))
+  }
+  function restZero(hw) {
+    setTasksByHw(p => ({ ...p, [hw.id]: (p[hw.id] || []).map(t => (t.score === '' || t.score == null) ? { ...t, score: 0 } : t) }))
+  }
+
+  // Изменение заданий и баллов уже опубликованного ДЗ (статус и оценки не трогаем, итог пересчитываем)
+  async function saveTasksEdit(hw) {
+    const list = tasksByHw[hw.id] || []
+    setTaskMsg(p => ({ ...p, [hw.id]: 'Сохраняю…' }))
+    for (const t of list) {
+      const max = Math.max(1, Number(t.max_score) || 1)
+      const patch = { max_score: max, title: (t.title || '').trim() || 'Задание' }
+      if (t.score != null && t.score !== '' && Number(t.score) > max) patch.score = max
+      const { error: err } = await supabase.from('homework_tasks').update(patch).eq('id', t.id)
+      if (err) return setTaskMsg(p => ({ ...p, [hw.id]: 'Ошибка: ' + err.message }))
+    }
+    const totalMax = list.reduce((s, t) => s + Math.max(1, Number(t.max_score) || 1), 0)
+    const patch = { total_tasks: totalMax }
+    if (hw.status === 'checked') {
+      if (hw.manual_total) patch.correct_tasks = Math.min(Number(hw.correct_tasks) || 0, totalMax)
+      else patch.correct_tasks = list.reduce((s, t) => s + (Number(t.score) || 0), 0)
+    }
+    await supabase.from('homework').update(patch).eq('id', hw.id)
+    setItems(arr => arr.map(x => x.id === hw.id ? { ...x, ...patch } : x))
+    setTaskMsg(p => ({ ...p, [hw.id]: 'Сохранено ✓' }))
+  }
+  // Для уже созданного ДЗ из банка: выставить максимум по номеру ЕГЭ (14–17 → 2, 18 → 3, 19–20 → 4 и т. д. по настройкам)
+  async function fixMaxByNumber(hw) {
+    const list = tasksByHw[hw.id] || []
+    setTaskMsg(p => ({ ...p, [hw.id]: 'Выставляю баллы…' }))
+    const st = await loadSettings()
+    const next = []
+    for (const t of list) {
+      const b = t.task_id ? bank[t.task_id] : null
+      const n = b ? numberOf(topics.find(x => x.id === b.topic_id)?.name || '') : 0
+      if (!b || !n) { next.push(t); continue }
+      const max = pointsFor(n, st), auto = !!b.answer && isPart1(n)
+      const { error: err } = await supabase.from('homework_tasks').update({ max_score: max, is_auto: auto }).eq('id', t.id)
+      if (err) return setTaskMsg(p => ({ ...p, [hw.id]: 'Ошибка: ' + err.message }))
+      next.push({ ...t, max_score: max, is_auto: auto, score: t.score != null && t.score !== '' && Number(t.score) > max ? max : t.score })
+    }
+    const totalMax = next.reduce((s, t) => s + (Number(t.max_score) || 1), 0)
+    const patch = { total_tasks: totalMax }
+    if (hw.status === 'checked') patch.correct_tasks = hw.manual_total ? Math.min(Number(hw.correct_tasks) || 0, totalMax) : next.reduce((s, t) => s + (Number(t.score) || 0), 0)
+    await supabase.from('homework').update(patch).eq('id', hw.id)
+    setTasksByHw(p => ({ ...p, [hw.id]: next }))
+    setItems(arr => arr.map(x => x.id === hw.id ? { ...x, ...patch } : x))
+    setTaskMsg(p => ({ ...p, [hw.id]: 'Баллы по номерам выставлены ✓ Теперь оцените вторую часть по заданиям.' }))
+  }
+  async function addTaskTo(hw) {
+    const list = tasksByHw[hw.id] || []
+    const { data, error: err } = await supabase.from('homework_tasks').insert({
+      homework_id: hw.id, position: list.length + 1, title: `Задание ${list.length + 1}`, max_score: 1,
+    }).select().single()
+    if (err) return setTaskMsg(p => ({ ...p, [hw.id]: 'Ошибка: ' + err.message }))
+    setTasksByHw(p => ({ ...p, [hw.id]: [...list, data] }))
+    await supabase.from('homework').update({ total_tasks: list.reduce((s, t) => s + (Number(t.max_score) || 1), 0) + 1 }).eq('id', hw.id)
+  }
+  async function removeTaskFrom(hw, t) {
+    if (!confirm(`Убрать «${t.title}» из этого ДЗ?`)) return
+    await supabase.from('homework_tasks').delete().eq('id', t.id)
+    setTasksByHw(p => ({ ...p, [hw.id]: (p[hw.id] || []).filter(x => x.id !== t.id) }))
+    setTaskMsg(p => ({ ...p, [hw.id]: 'Задание убрано. Нажмите «Сохранить баллы», чтобы пересчитать итог.' }))
+  }
+
+  async function setDue(hw, date, time) {
+    const f = dueFields(date, time)
+    setDueMsg({ id: hw.id, text: 'Сохраняю…', ok: true })
+    const { data, error: err } = await supabase.from('homework').update(f).eq('id', hw.id).select('id')
+    if (err) return setDueMsg({ id: hw.id, text: 'Не удалось сохранить дедлайн: ' + err.message, ok: false })
+    if (!data || data.length === 0) return setDueMsg({ id: hw.id, text: 'Не удалось сохранить дедлайн: база не разрешила изменение (проверьте вход и права).', ok: false })
+    setItems(list => list.map(x => x.id === hw.id ? { ...x, ...f } : x))
+    setDueMsg({ id: hw.id, text: date ? 'Дедлайн сохранён ✅' : 'Дедлайн убран', ok: true })
+  }
+
+  async function deleteHomework(hw) {
+    if (!confirm(`Удалить ДЗ «${hw.title}» целиком?\n\nИсчезнут все задания, ответы и оценки по нему. Отменить нельзя.`)) return
+    const { error: err } = await supabase.from('homework').delete().eq('id', hw.id)
+    if (err) return setError('Не удалось удалить: ' + err.message)
+    loadAll(); setOpenId(null)
+  }
+
+  async function reopenForRework(hw) {
+    await supabase.from('homework').update({ status: 'assigned' }).eq('id', hw.id)
+    loadAll(); setOpenId(null)
+  }
+
+  async function saveAttachments(hw) {
+    setEditSaving(true)
+    try {
+      let finalAttachments = editAttach
+      if (editNewFiles.length > 0) {
+        const uploaded = await uploadFiles('attachments', editNewFiles, (i, t) => setProgress(`Загрузка ${i} из ${t}…`))
+        finalAttachments = [...editAttach, ...uploaded]
+      }
+      await supabase.from('homework').update({ attachments: finalAttachments }).eq('id', hw.id)
+      setEditAttach(null); setEditNewFiles([]); setProgress('')
+      loadAll()
+    } catch (e) {
+      setError('Ошибка: ' + e.message)
+    } finally {
+      setEditSaving(false)
+    }
+  }
+
+  function updTask(hwId, taskId, field, value) {
+    setTasksByHw(p => ({ ...p, [hwId]: (p[hwId] || []).map(t => t.id === taskId ? { ...t, [field]: value } : t) }))
+  }
+
+  const toggleIn = (arr, id) => arr.includes(id) ? arr.filter(x => x !== id) : [...arr, id]
+  const groupStudentIds = viewFilter.kind === 'group'
+    ? new Set(links.filter(l => l.group_id === viewFilter.id).map(l => l.student_id))
+    : null
+  const visibleItems = items.filter(hw => {
+    if (viewFilter.kind === 'student' && hw.student_id !== viewFilter.id) return false
+    if (viewFilter.kind === 'group' && !groupStudentIds.has(hw.student_id)) return false
+    if (viewTopic && hw.topic_id !== viewTopic) return false
+    return true
+  })
+  const submittedCount = items.filter(h => h.status === 'submitted').length
+  const targetCount = resolveTargets().length
+
+  return (
+    <div className="screen">
+      <div className="row-between">
+        <h1>Домашние задания</h1>
+        {submittedCount > 0 && <span className="tag tag-blue">{submittedCount} на проверке</span>}
+      </div>
+
+      {!draft.open ? (
+        <button className="btn-primary block" onClick={() => up({ open: true })}>+ Задать ДЗ</button>
+      ) : (
+        <div className="card">
+          <p className="eyebrow">Кому задать</p>
+          <div className="btn-row" style={{ flexWrap: 'wrap' }}>
+            <button className={'filter-chip' + (draft.mode === 'students' ? ' active' : '')} onClick={() => up({ mode: 'students' })}>👤 Выбрать учеников</button>
+            <button className={'filter-chip' + (draft.mode === 'groups' ? ' active' : '')} onClick={() => up({ mode: 'groups' })}>👥 Группы</button>
+            <button className={'filter-chip' + (draft.mode === 'all' ? ' active' : '')} onClick={() => up({ mode: 'all' })}>🌐 Всем</button>
+          </div>
+
+          {draft.mode === 'students' && (
+            <div className="pick-list">
+              {students.map(s => (
+                <label key={s.id} className="checkbox-row">
+                  <input type="checkbox" checked={draft.studentIds.includes(s.id)}
+                    onChange={() => up({ studentIds: toggleIn(draft.studentIds, s.id) })} />
+                  {s.first_name} {s.last_name}
+                </label>
+              ))}
+            </div>
+          )}
+          {draft.mode === 'groups' && (
+            <div className="pick-list">
+              {groups.map(g => (
+                <label key={g.id} className="checkbox-row">
+                  <input type="checkbox" checked={draft.groupIds.includes(g.id)}
+                    onChange={() => up({ groupIds: toggleIn(draft.groupIds, g.id) })} />
+                  {g.name} <span className="muted">({links.filter(l => l.group_id === g.id).length} чел.)</span>
+                </label>
+              ))}
+            </div>
+          )}
+          <p className="muted small-text">Получателей: {targetCount}</p>
+
+          <input className="text-input" placeholder={draft.lessonTopic ? `Название ДЗ (если пусто — «ДЗ: ${draft.lessonTopic}»)` : "Название ДЗ (необязательно)"} value={draft.title} onChange={e => up({ title: e.target.value })} />
+          <textarea className="text-input" placeholder="Описание" value={draft.description} onChange={e => up({ description: e.target.value })} />
+          <p className="eyebrow">⏰ Дедлайн (сдать до)</p>
+          <DueEditor date={draft.due_date} time={draft.due_time} onChange={(d, t) => up({ due_date: d, due_time: t })} />
+
+          <AutoHomework draft={draft} up={up} topics={topics} subtopics={subtopics} targets={resolveTargets()} />
+
+          <p className="eyebrow">Папка (номер и тема)</p>
+          <TopicPicker topics={topics} subtopics={subtopics}
+            topicId={draft.topic_id} subtopicId={draft.subtopic_id} onChange={p => up(p)} />
+
+          <FileUploader files={draft.files} onChange={f => up({ files: f })}
+            accept="image/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.zip"
+            label="Прикрепить фото и файлы" />
+
+          <p className="eyebrow">Задания и баллы</p>
+          {draft.tasks.map((t, i) => (
+            <div key={i} className="btn-row">
+              <input className="text-input" placeholder={`Задание ${i + 1}`} value={t.title}
+                onChange={e => up({ tasks: draft.tasks.map((x, j) => j === i ? { ...x, title: e.target.value } : x) })} />
+              <input type="number" min="1" className="text-input score-input" value={t.max_score}
+                onChange={e => up({ tasks: draft.tasks.map((x, j) => j === i ? { ...x, max_score: e.target.value } : x) })} />
+              {draft.tasks.length > 1 && <button className="file-remove" onClick={() => up({ tasks: draft.tasks.filter((_, j) => j !== i) })}>✕</button>}
+            </div>
+          ))}
+          <button className="btn-secondary block" onClick={() => up({ tasks: [...draft.tasks, { title: `Задание ${draft.tasks.length + 1}`, max_score: 1 }] })}>
+            + Добавить задание
+          </button>
+          <p className="muted small-text">Максимум: {draft.tasks.reduce((s, t) => s + (Number(t.max_score) || 0), 0)} баллов</p>
+
+          {error && <p className="error-text">⚠️ {error}</p>}
+          {progress && <p className="muted">{progress}</p>}
+          <div className="btn-row">
+            <button className="btn-primary" disabled={saving} onClick={addHomework}>{saving ? 'Сохранение…' : 'Отправить'}</button>
+            <button className="btn-secondary" onClick={() => up({ open: false })}>Свернуть</button>
+            <button className="btn-secondary" onClick={clearDraft}>Очистить</button>
+          </div>
+        </div>
+      )}
+
+      <p className="eyebrow">Показать</p>
+      <div className="filter-row">
+        <button className={'filter-chip' + (viewFilter.kind === 'all' ? ' active' : '')}
+          onClick={() => setViewFilter({ kind: 'all', id: null })}>🌐 Все</button>
+        {groups.map(g => (
+          <button key={g.id} className={'filter-chip' + (viewFilter.id === g.id ? ' active' : '')}
+            onClick={() => setViewFilter({ kind: 'group', id: g.id })}>👥 {g.name}</button>
+        ))}
+        {students.map(st => (
+          <button key={st.id} className={'filter-chip' + (viewFilter.id === st.id ? ' active' : '')}
+            onClick={() => setViewFilter({ kind: 'student', id: st.id })}>👤 {st.first_name}</button>
+        ))}
+      </div>
+
+      <div className="filter-row">
+        <button className={'filter-chip' + (viewTopic === null ? ' active' : '')} onClick={() => setViewTopic(null)}>📂 Все номера</button>
+        {topics.map(t => (
+          <button key={t.id} className={'filter-chip' + (viewTopic === t.id ? ' active' : '')}
+            onClick={() => setViewTopic(t.id)}>📁 {t.name}</button>
+        ))}
+      </div>
+
+      {loading ? <p className="muted">Загрузка…</p> : (
+        <ul className="card-list">
+          {visibleItems.length === 0 && <p className="muted">Ничего не найдено по этому фильтру.</p>}
+          {visibleItems.map(hw => {
+            const list = tasksByHw[hw.id] || []
+            const subs = subsByHw[hw.id] || []
+            const curMax = list.reduce((s, t) => s + (Number(t.max_score) || 0), 0)
+            const curScore = list.reduce((s, t) => s + (Number(t.score) || 0), 0)
+            return (
+              <li key={hw.id} className="card">
+                <div className="row-between" style={{ cursor: 'pointer' }} onClick={() => openCard(hw)}>
+                  <div>
+                    <p className="card-title">{hw.title}</p>
+                    <p className="muted">{hw.students ? `${hw.students.first_name} ${hw.students.last_name || ''}` : ''}</p>
+                    {hw.topics && <p className="muted small-text">📁 {hw.topics.name}{hw.subtopics ? ` → ${hw.subtopics.name}` : ''}</p>}
+                    <p className="muted small-text">{hw.due_date ? `⏰ До ${fmtDue(hw)}` : '⏰ Без дедлайна'}</p>
+                  </div>
+                  {hw.status === 'submitted' ? <span className="tag tag-blue">📨 Проверить</span>
+                    : hw.status === 'checked' ? <span className="tag tag-green">{hw.correct_tasks}/{hw.total_tasks}</span>
+                    : <span className="tag tag-yellow">Не сдано</span>}
+                </div>
+
+                {openId === hw.id && (
+                  <div className="card-details">
+                    <p className="eyebrow">⏰ Дедлайн</p>
+                    <DueEditor date={dueParts(hw).date} time={dueParts(hw).time} onChange={(d, t) => setDue(hw, d, t)} />
+                    {dueMsg?.id === hw.id && <p className={dueMsg.ok ? 'muted small-text' : 'error-text'}>{dueMsg.ok ? '' : '⚠️ '}{dueMsg.text}</p>}
+                    <p className="eyebrow">Файлы задания</p>
+                    {editAttach ? (
+                      <>
+                        <AttachmentEditor items={editAttach} onChange={setEditAttach} />
+                        <p className="eyebrow">Добавить ещё файлы</p>
+                        <FileUploader files={editNewFiles} onChange={setEditNewFiles} accept="image/*,video/*,.pdf,.doc,.docx" label="Выбрать новые файлы" />
+                        <div className="btn-row">
+                          <button className="btn-primary" disabled={editSaving} onClick={() => saveAttachments(hw)}>{editSaving ? 'Сохранение…' : 'Сохранить'}</button>
+                          <button className="btn-secondary" onClick={() => { setEditAttach(null); setEditNewFiles([]) }}>Отмена</button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <AttachmentList items={hw.attachments} />
+                        {hw.attachments?.length > 0 &&
+                          <button className="btn-secondary block" onClick={() => { setEditAttach(hw.attachments); setEditNewFiles([]) }}>✏️ Изменить порядок / удалить</button>}
+                      </>
+                    )}
+
+                    {subs.length > 0 && (
+                      <>
+                        <p className="eyebrow">Сдачи ученика ({subs.length})</p>
+                        {subs.map(s => (
+                          <div key={s.id} className="task-grade">
+                            <p className={s.is_late ? 'late-time' : 'ontime-time'}>
+                              Попытка {s.attempt} · {new Date(s.submitted_at).toLocaleString('ru-RU')} {s.is_late ? '(после дедлайна)' : '(в срок)'}
+                            </p>
+                            {s.comment && <p className="muted">💬 {s.comment}</p>}
+                            <AttachmentList items={s.attachments} compact />
+                          </div>
+                        ))}
+                      </>
+                    )}
+
+                    <p className="eyebrow">Баллы и оценка</p>
+                    <div className="quick-grade">
+                      <p className="muted small-text">Быстро: поставьте общий балл одним числом — без оценки каждого задания.</p>
+                      <div className="row-center" style={{ gap: 8, flexWrap: 'wrap' }}>
+                        <input className="text-input score-input" inputMode="decimal" placeholder={hw.manual_total && hw.status === 'checked' ? String(hw.correct_tasks) : '—'}
+                          value={totalDraft[hw.id] ?? ''} onChange={e => setTotalDraft(p => ({ ...p, [hw.id]: e.target.value }))} />
+                        <span className="muted">из {curMax}</span>
+                        <button type="button" className="filter-chip" onClick={() => setTotalDraft(p => ({ ...p, [hw.id]: String(curMax) }))}>Максимум</button>
+                      </div>
+                    </div>
+                    <p className="muted small-text" style={{ marginTop: 10 }}>Или по заданиям (нажмите балл):</p>
+                    <div className="row-center" style={{ gap: 8, flexWrap: 'wrap' }}>
+                      <button type="button" className="filter-chip" onClick={() => allFull(hw)}>✅ Всё верно</button>
+                      <button type="button" className="filter-chip" onClick={() => restZero(hw)}>Остальное — 0</button>
+                    </div>
+                    {list.map(t => {
+                      const max = Number(t.max_score) || 1
+                      return (
+                        <div key={t.id} className="task-grade">
+                          <div className="row-between" style={{ gap: 6, flexWrap: 'wrap' }}>
+                            <AutoTextarea style={{ flex: 1, minWidth: 120 }} value={t.title ?? ''} onChange={e => updTask(hw.id, t.id, 'title', e.target.value)} />
+                            <span className="row-center" style={{ gap: 4 }}>
+                              <span className="muted small-text">макс.</span>
+                              <input type="number" min="1" className="score-input inline-input" value={t.max_score}
+                                onChange={e => updTask(hw.id, t.id, 'max_score', e.target.value)} />
+                              {!t.task_id && list.length > 1 && <button className="file-remove" onClick={() => removeTaskFrom(hw, t)}>✕</button>}
+                            </span>
+                          </div>
+                          {t.task_id && bank[t.task_id] && (() => {
+                            const b = bank[t.task_id], sImgs = solutionImages(b), aImgs = answerImages(b)
+                            return (
+                              <div className="task-panel" style={{ margin: '8px 0' }}>
+                                {b.condition && <p className="task-text">{b.condition}</p>}
+                                <AttachmentList items={b.condition_attachments} full />
+                                {b.answer && <p className="small-text">Правильный ответ: <b>{b.answer.split('|')[0]}</b></p>}
+                                {(b.solution || sImgs.length > 0 || aImgs.length > 0) && (
+                                  <button type="button" className={'chip-btn' + (openSol[t.id] ? ' on' : '')} onClick={() => setOpenSol(p => ({ ...p, [t.id]: !p[t.id] }))}>📖 Решение</button>
+                                )}
+                                {openSol[t.id] && (
+                                  <>
+                                    {b.solution && <p className="task-text">{b.solution}</p>}
+                                    <AttachmentList items={sImgs} full />
+                                    <AttachmentList items={aImgs} full />
+                                  </>
+                                )}
+                              </div>
+                            )
+                          })()}
+                          {t.task_id && !bank[t.task_id] && <p className="muted small-text">Загрузка условия…</p>}
+                          {t.task_id && <p className="muted small-text">Ответ ученика: <b>{t.student_answer || '—'}</b>{t.is_auto ? ' (проверено автоматически)' : ' (проверьте вручную)'}</p>}
+                          {t.task_id && t.student_attachments?.length > 0 && <AttachmentList items={t.student_attachments} compact />}
+                          <div className="row-center" style={{ gap: 6, flexWrap: 'wrap' }}>
+                            {max <= 5 ? Array.from({ length: max + 1 }, (_, v) => (
+                              <button type="button" key={v} className={'filter-chip' + (t.score != null && t.score !== '' && Number(t.score) === v ? ' active' : '')}
+                                onClick={() => { setTotalDraft(p => ({ ...p, [hw.id]: '' })); updTask(hw.id, t.id, 'score', v) }}>{max === 1 ? (v ? '✓ верно' : '✕ неверно') : v}</button>
+                            )) : (
+                              <input type="number" min="0" max={max} className="score-input inline-input" value={t.score ?? ''} placeholder="—"
+                                onChange={e => { setTotalDraft(p => ({ ...p, [hw.id]: '' })); updTask(hw.id, t.id, 'score', e.target.value) }} />
+                            )}
+                          </div>
+                          <AutoTextarea minRows={2} placeholder="Комментарий к заданию"
+                            value={t.comment ?? ''} onChange={e => updTask(hw.id, t.id, 'comment', e.target.value)} />
+                        </div>
+                      )
+                    })}
+                    <div className="btn-row">
+                      <button className="btn-secondary" onClick={() => addTaskTo(hw)}>+ Добавить задание</button>
+                      {list.some(t => t.task_id) && <button className="btn-secondary" onClick={() => fixMaxByNumber(hw)}>🔢 Баллы по номерам ЕГЭ</button>}
+                      <button className="btn-secondary" onClick={() => saveTasksEdit(hw)}>💾 Сохранить баллы заданий</button>
+                    </div>
+                    {taskMsg[hw.id] && <p className="muted small-text">{taskMsg[hw.id]}</p>}
+                    <p className="eyebrow">📎 Файл ученику к проверке (разбор ошибок, фото, PDF)</p>
+                    <AttachmentEditor items={fbKeep[hw.id] ?? hw.feedback_attachments ?? []} onChange={v => setFbKeep(p => ({ ...p, [hw.id]: v }))} />
+                    <FileUploader files={fbFiles[hw.id] || []} onChange={f => setFbFiles(p => ({ ...p, [hw.id]: f }))}
+                      accept="image/*,video/*,.pdf,.doc,.docx" label="Прикрепить файл к проверке" />
+                    {list.length > 0 && (
+                      <>
+                        <p className="score-line">Итого: {String(totalDraft[hw.id] ?? '').trim() !== '' ? totalDraft[hw.id] : curScore} / {curMax}</p>
+                        <button className="btn-primary block" onClick={() => saveGrade(hw)}>✅ Отправить результат</button>
+                      </>
+                    )}
+                    {hw.status === 'checked' && (
+                      <button className="btn-secondary block" onClick={() => reopenForRework(hw)}>🔄 Вернуть на доработку</button>
+                    )}
+                    <button className="btn-secondary block" style={{ color: 'var(--red, #ff6b6b)' }} onClick={() => deleteHomework(hw)}>🗑 Удалить ДЗ целиком</button>
+                  </div>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
+}
